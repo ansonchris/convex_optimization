@@ -1,0 +1,124 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 1. 基础参数定义 (7 行业 x 5 评级)
+# ==========================================
+industries = ['Retail', 'Logistics', 'Construction', 'Tech', 'Mfg', 'Service', 'Agri']
+grades = ['A', 'B', 'C', 'D', 'E']
+n_ind = len(industries)
+n_grade = len(grades)
+
+# 模拟 35 个格子的平均销售额 (单位：万元)
+np.random.seed(42)
+avg_sales = np.random.uniform(500, 2000, (n_ind, n_grade))
+
+# 信用评级的基准 PD (A 到 E 递增)
+base_pds = np.array([0.01, 0.03, 0.07, 0.15, 0.25])
+
+# 固定业务参数
+r = 0.12       # 净利息收益率 12%
+lgd = 0.60     # 违约损失率 60%
+alpha = 0.4    # 利用率参数 alpha
+beta = 0.3     # 利用率参数 beta
+gamma = 0.5    # PD 敏感度参数 gamma
+
+# ==========================================
+# 2. 核心数学公式
+# ==========================================
+def get_utilization(m):
+    return np.clip(alpha * (m ** -beta), 0.05, 0.95)
+
+def get_adjusted_pd(m, base_pd):
+    return base_pd * (1 + gamma * m)
+
+def simulate_portfolio(m_matrix):
+    """
+    输入一个 35 格的 m 矩阵，计算该策略下的组合总利润和总损失
+    """
+    total_rev = 0
+    total_loss = 0
+    
+    for i in range(n_ind):
+        for j in range(n_grade):
+            m = m_matrix[i, j]
+            sales = avg_sales[i, j]
+            base_pd = base_pds[j]
+            
+            # 计算 EAD (动用额度)
+            u = get_utilization(m)
+            ead = sales * m * u
+            
+            # 收益与损失
+            rev = ead * r
+            loss = ead * get_adjusted_pd(m, base_pd) * lgd
+            
+            total_rev += rev
+            total_loss += loss
+            
+    # 总利润 = 总收益 - 总损失 (即 LAR)
+    total_profit = total_rev - total_loss
+    return total_profit, total_loss
+
+# ==========================================
+# 3. 蒙特卡洛随机策略生成器
+# ==========================================
+def generate_random_strategy():
+    """
+    生成一个满足单调性约束的 35 格 m 矩阵
+    约束：同一行业内，Grade A >= B >= C >= D >= E
+    """
+    m_matrix = np.zeros((n_ind, n_grade))
+    for i in range(n_ind):
+        # 随机生成 5 个 2% 到 40% 之间的倍数并降序排列
+        random_m = np.random.uniform(0.02, 0.40, n_grade)
+        m_matrix[i, :] = np.sort(random_m)[::-1] 
+    return m_matrix
+
+# ==========================================
+# 4. 执行模拟 (运行 10,000 次)
+# ==========================================
+n_simulations = 20000
+results = []
+
+for _ in range(n_simulations):
+    strategy = generate_random_strategy()
+    profit, loss = simulate_portfolio(strategy)
+    results.append({'profit': profit, 'loss': loss, 'strategy': strategy})
+
+df_sim = pd.DataFrame(results)
+
+# ==========================================
+# 5. 提取有效边界 (Efficient Frontier)
+# ==========================================
+# 将损失划分为不同的区间(Buckets)，在每个区间内找出利润最高的那一个点
+df_sim['loss_bucket'] = pd.cut(df_sim['loss'], bins=30)
+frontier = df_sim.loc[df_sim.groupby('loss_bucket')['profit'].idxmax()].dropna()
+frontier = frontier.sort_values(by='loss')
+
+# ==========================================
+# 6. 结果可视化
+# ==========================================
+plt.figure(figsize=(10, 6))
+# 绘制所有模拟策略（策略云）
+plt.scatter(df_sim['loss'], df_sim['profit'], color='lightblue', alpha=0.4, s=10, label='Simulated Strategies')
+# 绘制有效边界
+plt.plot(frontier['loss'], frontier['profit'], color='red', marker='o', linewidth=2, label='Efficient Frontier')
+
+plt.title('SME Credit Limit Optimization: Efficient Frontier via Monte Carlo')
+plt.xlabel('Total Expected Losses (Change in Risk)')
+plt.ylabel('Projected Portfolio Profit (LAR)')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# ==========================================
+# 7. 导出你挑选的最优策略
+# ==========================================
+# 比如：我们选择有效边界上利润最高（拐点）的那个策略
+best_strategy_record = frontier.loc[frontier['profit'].idxmax()]
+print("\n" + "="*45)
+print(f"【最优策略点】 总利润: {best_strategy_record['profit']:,.2f} 万元")
+print(f"【最优策略点】 总预期损失: {best_strategy_record['loss']:,.2f} 万元")
+print("="*45)

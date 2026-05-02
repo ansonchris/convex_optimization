@@ -1,0 +1,126 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 1. SETUP & PARAMETERS
+# ==========================================
+industries = ['Retail', 'Logistics', 'Construction', 'Tech', 'Mfg', 'Service', 'Agri']
+grades = ['A', 'B', 'C', 'D', 'E'] 
+n_ind, n_grade = len(industries), len(grades)
+
+# Business Guardrails
+M_MIN, M_MAX = 0.05, 0.35  # Range constraint
+r, lgd = 0.12, 0.60        # Return and Loss parameters
+alpha, beta, gamma = 0.4, 0.3, 0.5 # Sensitivity parameters
+
+np.random.seed(42)
+avg_sales = np.random.uniform(500, 2000, (n_ind, n_grade))
+base_pds = np.array([0.01, 0.03, 0.07, 0.15, 0.25])
+
+# ==========================================
+# 2. CORE FUNCTIONS
+# ==========================================
+def get_performance(m_matrix):
+    """Calculates Total Profit (LAR) and Total Expected Loss."""
+    total_rev = 0
+    total_loss = 0
+    for i in range(n_ind):
+        for j in range(n_grade):
+            m = m_matrix[i, j]
+            # Utilization Power Function
+            u = np.clip(alpha * (m ** -beta), 0.05, 0.95)
+            # Risk Sensitivity Function
+            pd_adj = base_pds[j] * (1 + gamma * m)
+            
+            ead = avg_sales[i, j] * m * u
+            total_rev += ead * r
+            total_loss += ead * pd_adj * lgd
+            
+    return total_rev - total_loss, total_loss
+
+def get_strategy_by_loss(target_loss, frontier_df):
+    """Finds the optimal 35-cell grid for a specific risk appetite."""
+    # Find the strategy on the frontier closest to the user's target loss
+    idx = (frontier_df['loss'] - target_loss).abs().idxmin()
+    match = frontier_df.loc[idx]
+    return match['profit'], match['loss'], match['strategy']
+
+# ==========================================
+# 3. MONTE CARLO SIMULATION
+# ==========================================
+# Establish Baseline (Current Status) for growth comparison
+base_m = np.full((n_ind, n_grade), 0.15)
+base_profit, base_loss = get_performance(base_m)
+
+n_simulations = 100000
+all_points = []
+valid_points = []
+
+for _ in range(n_simulations):
+    m_matrix = np.zeros((n_ind, n_grade))
+    for i in range(n_ind):
+        # CONSTRAINT 1 & 2: Range [0.05, 0.35] + Non-decreasing with Grade
+        # We generate 5 values and sort descending (Grade A is index 0)
+        m_matrix[i, :] = np.sort(np.random.uniform(M_MIN, M_MAX, n_grade))[::-1]
+    
+    profit, loss = get_performance(m_matrix)
+    
+    # Calculate Growth Rates relative to Baseline
+    p_growth = (profit - base_profit) / base_profit
+    l_growth = (loss - base_loss) / base_loss
+    
+    data_point = {'profit': profit, 'loss': loss, 'strategy': m_matrix}
+    all_points.append(data_point)
+    
+    # CONSTRAINT 3: Profit Growth Rate > Loss Growth Rate
+    if p_growth > l_growth:
+        valid_points.append(data_point)
+
+df_all = pd.DataFrame(all_points)
+df_valid = pd.DataFrame(valid_points)
+
+# ==========================================
+# 4. BUILDING THE EFFICIENT FRONTIER
+# ==========================================
+# Group by loss buckets to find the 'ceiling' of the profit cloud
+df_valid['loss_bucket'] = pd.cut(df_valid['loss'], bins=30)
+frontier = df_valid.loc[df_valid.groupby('loss_bucket')['profit'].idxmax()].sort_values('loss')
+
+# ==========================================
+# 5. PLOTTING RESULTS
+# ==========================================
+plt.figure(figsize=(12, 7))
+
+# Plot all attempted strategies (Sub-optimal or failed growth constraint)
+plt.scatter(df_all['loss'], df_all['profit'], color='lightgrey', alpha=0.2, s=5, label='Discarded Scenarios')
+
+# Plot effective strategies
+plt.scatter(df_valid['loss'], df_valid['profit'], color='skyblue', alpha=0.5, s=10, label='Valid Strategies (Growth Ratio > 1)')
+
+# Plot the Efficient Frontier
+plt.plot(frontier['loss'], frontier['profit'], color='darkblue', marker='o', markersize=4, linewidth=2, label='Efficient Frontier')
+
+# Plot the Baseline Point
+plt.scatter(base_loss, base_profit, color='red', marker='^', s=200, label='Baseline (Current Operating Point)', zorder=5)
+
+plt.title('SME Credit Limit Optimization: Monte Carlo Simulation Results', fontsize=14)
+plt.xlabel('Total Expected Loss (Risk)', fontsize=12)
+plt.ylabel('Total Projected Profit (LAR)', fontsize=12)
+plt.legend(loc='lower right')
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+
+# ==========================================
+# 6. RETRIEVAL EXAMPLE
+# ==========================================
+# Example: We want a strategy that accepts roughly 10% more loss than baseline
+target_risk = base_loss * 1.10
+opt_p, opt_l, best_m = get_strategy_by_loss(target_risk, frontier)
+
+print(f"\n--- Strategy Retrieval for Target Loss: {target_risk:,.2f} ---")
+print(f"Projected Profit (LAR): {opt_p:,.2f}")
+print(f"Actual Resulting Loss:  {opt_l:,.2f}")
+print("-" * 50)
+print("Optimized Multiplier Grid (m*) - Monotonicity and Range Verified:")
+print(pd.DataFrame(best_m, index=industries, columns=grades).applymap(lambda x: f"{x:.2%}"))

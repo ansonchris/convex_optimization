@@ -1,0 +1,114 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.interpolate import UnivariateSpline
+
+# ==========================================
+# 1. SETUP & SIMULATION LOGIC
+# ==========================================
+industries = ['Retail', 'Logistics', 'Construction', 'Tech', 'Mfg', 'Service', 'Agri']
+grades = ['A', 'B', 'C', 'D', 'E'] 
+n_ind, n_grade = len(industries), len(grades)
+
+M_MIN, M_MAX = 0.05, 0.35
+r, lgd = 0.12, 0.60
+alpha, beta, gamma = 0.4, 0.3, 0.5
+
+np.random.seed(42)
+avg_sales = np.random.uniform(500, 2000, (n_ind, n_grade))
+base_pds = np.array([0.01, 0.03, 0.07, 0.15, 0.25])
+
+def get_performance(m_matrix):
+    total_rev, total_loss = 0, 0
+    for i in range(n_ind):
+        for j in range(n_grade):
+            m = m_matrix[i, j]
+            u = np.clip(alpha * (m ** -beta), 0.05, 0.95)
+            pd_adj = base_pds[j] * (1 + gamma * m)
+            ead = avg_sales[i, j] * m * u
+            total_rev += ead * r
+            total_loss += ead * pd_adj * lgd
+    return total_rev - total_loss, total_loss
+
+# Baseline for growth constraints
+base_m = np.full((n_ind, n_grade), 0.15)
+base_p, base_l = get_performance(base_m)
+
+# Run Simulation
+n_simulations = 20000 
+valid_points = []
+
+for _ in range(n_simulations):
+    m_matrix = np.zeros((n_ind, n_grade))
+    for i in range(n_ind):
+        # CONSTRAINT: Range + Monotonicity (A >= B >= C >= D >= E)
+        m_matrix[i, :] = np.sort(np.random.uniform(M_MIN, M_MAX, n_grade))[::-1]
+    
+    p, l = get_performance(m_matrix)
+    
+    # CONSTRAINT: Profit Growth Rate > Loss Growth Rate
+    if ((p - base_p)/base_p) > ((l - base_l)/base_l):
+        valid_points.append({'profit': p, 'loss': l, 'strategy': m_matrix})
+
+df = pd.DataFrame(valid_points)
+
+# ==========================================
+# 2. FRONTIER SMOOTHING (Univariate Spline)
+# ==========================================
+# 1. Get raw frontier points
+df['loss_bucket'] = pd.cut(df['loss'], bins=50)
+frontier_raw = df.loc[df.groupby('loss_bucket')['profit'].idxmax()].sort_values('loss').dropna()
+
+# 2. Create a smooth spline for the plot
+spline = UnivariateSpline(frontier_raw['loss'], frontier_raw['profit'], s=50000) # 's' controls smoothness
+loss_smooth = np.linspace(frontier_raw['loss'].min(), frontier_raw['loss'].max(), 200)
+profit_smooth = spline(loss_smooth)
+
+# ==========================================
+# 3. ENHANCED RETRIEVAL FUNCTION
+# ==========================================
+def get_optimized_strategy(target_value, mode='loss'):
+    """
+    Retrieves the best 35-cell matrix for a target.
+    mode: 'loss' or 'profit'
+    """
+    column = 'loss' if mode == 'loss' else 'profit'
+    # Find the strategy on the frontier closest to the target
+    idx = (frontier_raw[column] - target_value).abs().idxmin()
+    res = frontier_raw.loc[idx]
+    
+    return {
+        'target_requested': target_value,
+        'actual_loss': res['loss'],
+        'actual_profit': res['profit'],
+        'm_matrix': res['strategy']
+    }
+
+# ==========================================
+# 4. VISUALIZATION
+# ==========================================
+plt.figure(figsize=(12, 7))
+plt.scatter(df['loss'], df['profit'], color='lightgrey', alpha=0.3, s=8, label='All Valid Scenarios')
+plt.plot(loss_smooth, profit_smooth, color='darkblue', linewidth=3, label='Smooth Efficient Frontier')
+plt.scatter(frontier_raw['loss'], frontier_raw['profit'], color='red', s=20, alpha=0.5, label='Raw Frontier Points')
+plt.scatter(base_l, base_p, color='orange', marker='D', s=100, label='Baseline', zorder=5)
+
+plt.title('SME Credit Optimization: Smooth Efficient Frontier', fontsize=14)
+plt.xlabel('Total Expected Loss', fontsize=12)
+plt.ylabel('Total Projected Profit (LAR)', fontsize=12)
+plt.legend()
+plt.grid(True, linestyle=':', alpha=0.7)
+plt.show()
+
+# ==========================================
+# 5. EXAMPLE USAGE
+# ==========================================
+# Example: Find strategy for a specific Profit target
+target_profit = base_p * 1.05 # Aim for 5% profit growth
+result = get_optimized_strategy(target_profit, mode='profit')
+
+print(f"--- Strategy for Target Profit: {result['target_requested']:,.2f} ---")
+print(f"Resulting Profit: {result['actual_profit']:,.2f}")
+print(f"Resulting Loss:   {result['actual_loss']:,.2f}")
+print("\nOptimized m* Matrix:")
+print(pd.DataFrame(result['m_matrix'], index=industries, columns=grades).applymap(lambda x: f"{x:.2%}"))

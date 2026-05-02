@@ -1,0 +1,138 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ==========================================
+# 1. 基础配置与约束范围
+# ==========================================
+industries = ['Retail', 'Logistics', 'Construction', 'Tech', 'Mfg', 'Service', 'Agri']
+grades = ['A', 'B', 'C', 'D', 'E']
+n_ind, n_grade = len(industries), len(grades)
+
+# 设定 m 的全局取值范围约束
+M_MIN = 0.05  # 每个格子最小不能低于 5%
+M_MAX = 0.35  # 每个格子最高不能超过 35%
+
+# 业务参数 (保持不变)
+r, lgd = 0.12, 0.60
+alpha, beta, gamma = 0.4, 0.3, 0.5
+avg_sales = np.random.uniform(500, 2000, (n_ind, n_grade))
+base_pds = np.array([0.01, 0.03, 0.07, 0.15, 0.25])
+
+# ==========================================
+# 2. 核心函数
+# ==========================================
+def get_performance(m_matrix):
+    """计算给定矩阵的总利润和总损失"""
+    total_rev = 0
+    total_loss = 0
+    for i in range(n_ind):
+        for j in range(n_grade):
+            m = m_matrix[i, j]
+            u = np.clip(alpha * (m ** -beta), 0.05, 0.95)
+            pd_adj = base_pds[j] * (1 + gamma * m)
+            ead = avg_sales[i, j] * m * u
+            total_rev += ead * r
+            total_loss += ead * pd_adj * lgd
+    return total_rev - total_loss, total_loss
+
+# ==========================================
+# 3. 设定基准策略 (Baseline)
+# ==========================================
+# 假设当前全行统一使用 15% 的倍数作为基准
+baseline_m = np.full((n_ind, n_grade), 0.15)
+base_profit, base_loss = get_performance(baseline_m)
+
+# ==========================================
+# 4. 执行带约束的蒙特卡洛模拟
+# ==========================================
+n_simulations = 20000
+valid_results = []
+all_results = []
+
+for _ in range(n_simulations):
+    # 约束 1: 随机生成 m 必须在 [M_MIN, M_MAX] 之间，且满足单调性
+    m_matrix = np.zeros((n_ind, n_grade))
+    for i in range(n_ind):
+        random_m = np.random.uniform(M_MIN, M_MAX, n_grade)
+        m_matrix[i, :] = np.sort(random_m)[::-1] 
+    
+    profit, loss = get_performance(m_matrix)
+    
+    # 计算增长率
+    profit_growth = (profit - base_profit) / base_profit
+    loss_growth = (loss - base_loss) / base_loss
+    
+    # 存储所有结果用于对比
+    res = {'profit': profit, 'loss': loss, 'p_growth': profit_growth, 'l_growth': loss_growth}
+    all_results.append(res)
+    
+    # 约束 2: 利润增长率必须高于损失增长率
+    if profit_growth > loss_growth:
+        valid_results.append(res)
+
+df_all = pd.DataFrame(all_results)
+df_valid = pd.DataFrame(valid_results)
+
+# ==========================================
+# 5. 可视化与有效边界提取
+# ==========================================
+plt.figure(figsize=(12, 7))
+
+# 绘制所有尝试过的点 (浅灰色)
+plt.scatter(df_all['loss'], df_all['profit'], color='lightgrey', alpha=0.3, s=5, label='Filtered Out')
+
+# 绘制满足“利润增长 > 损失增长”的有效点 (蓝色)
+plt.scatter(df_valid['loss'], df_valid['profit'], color='skyblue', alpha=0.6, s=10, label='Effective Points (P-Growth > L-Growth)')
+
+# 标记基准点 (红三角)
+plt.scatter(base_loss, base_profit, color='red', marker='^', s=150, label='Current Baseline (m=0.15)', zorder=5)
+
+# 提取并绘制有效边界 (在有效点中寻找最优沿)
+df_valid['loss_bucket'] = pd.cut(df_valid['loss'], bins=25)
+frontier = df_valid.loc[df_valid.groupby('loss_bucket')['profit'].idxmax()].sort_values(by='loss')
+plt.plot(frontier['loss'], frontier['profit'], color='darkblue', linewidth=3, label='Optimized Efficient Frontier')
+
+plt.title('Monte Carlo Optimization with Growth & Range Constraints')
+plt.xlabel('Total Expected Loss')
+plt.ylabel('Total Projected Profit (LAR)')
+plt.legend()
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+
+print(f"模拟总数: {n_simulations}")
+print(f"符合约束的有效点数量: {len(df_valid)}")
+
+
+def get_strategy_by_loss(target_loss, frontier_df):
+    """
+    Finds the closest point on the Efficient Frontier to the target loss
+    and returns the Profit and the 35-segment Multiplier Matrix.
+    """
+    # Find the row with the minimum absolute difference to target_loss
+    idx = (frontier_df['loss'] - target_loss).abs().idxmin()
+    best_match = frontier_df.loc[idx]
+    
+    return best_match['profit'], best_match['loss'], best_match['strategy']
+
+# --- EXECUTION ---
+
+# 1. Define your risk appetite (Target Loss in 万元)
+# You can get this value by looking at the X-axis of your generated plot
+my_risk_appetite = 300.0  
+
+opt_profit, actual_loss, m_matrix = get_strategy_by_loss(my_risk_appetite, frontier)
+
+# 2. Display the Results
+print(f"--- Strategy Results for Target Loss: {my_risk_appetite:,.2f} ---")
+print(f"Resulting Total Profit (LAR): {opt_profit:,.2f}")
+print(f"Actual Expected Loss:        {actual_loss:,.2f}")
+print("-" * 50)
+
+# 3. Print the 35-segment Multiplier Lookup Table
+m_df = pd.DataFrame(m_matrix, index=industries, columns=[f"Grade {g}" for g in grades])
+print("Optimized Multiplier Matrix (m*):")
+print(m_df.applymap(lambda x: f"{x:.2%}"))
+
+# 4. Save to CSV for the Bank's Decision Engine
+# m_df.to_csv("optimized_multipliers.csv")
